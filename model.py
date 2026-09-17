@@ -14,6 +14,7 @@ class GPTConfig:
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
+    dropout: float = 0.0   # 0.0 keeps old checkpoints compatible; use ~0.2 when training
 
 
 class CausalSelfAttention(nn.Module):
@@ -22,7 +23,9 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
+        self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
+        self.dropout = config.dropout
         self.n_embd = config.n_embd
 
     def forward(self, x):
@@ -33,9 +36,12 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_head, head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, head_dim).transpose(1, 2)
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # Randomly zero some attention weights during training (regularization)
+        dropout_p = self.dropout if self.training else 0.0
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=dropout_p)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.c_proj(y)
+        y = self.resid_dropout(self.c_proj(y))
+        return y
 
 
 class MLP(nn.Module):
@@ -44,11 +50,12 @@ class MLP(nn.Module):
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.gelu = nn.GELU(approximate='tanh')
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
         x = self.c_fc(x)
         x = self.gelu(x)
-        return self.c_proj(x)
+        return self.dropout(self.c_proj(x))
 
 
 class Block(nn.Module):

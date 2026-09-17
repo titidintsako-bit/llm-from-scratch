@@ -2,7 +2,7 @@
 generate.py — Text Generation from a Trained GPT
 """
 import torch
-from model import GPT
+from model import GPT, GPTConfig
 
 
 @torch.no_grad()
@@ -38,8 +38,10 @@ if __name__ == "__main__":
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
-    checkpoint = torch.load(args.checkpoint, weights_only=False)
+    checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     config = checkpoint["config"]
+    if not isinstance(config, GPTConfig):          # new checkpoints store a plain dict
+        config = GPTConfig(**config)
     stoi = checkpoint["stoi"]
     itos = checkpoint["itos"]
 

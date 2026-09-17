@@ -1,0 +1,8 @@
+# Training artifacts — don't commit these
+data/
+*.pt
+loss_log.json
+loss_curves.png
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
