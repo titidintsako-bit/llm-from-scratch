@@ -41,7 +41,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 @dataclass
 class GPTConfig:
@@ -60,6 +60,7 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
+        self.n_embd = config.n_embd
         self.dropout = config.dropout
     def forward(self, x):
         B, T, C = x.shape
@@ -254,7 +255,7 @@ for step in pbar:
             torch.save({
                 "step": step,
                 "model_state_dict": model.state_dict(),
-                "config": dataclasses.asdict(config),  # plain dict = portable
+                "config": asdict(config),  # plain dict = portable
                 "stoi": stoi, "itos": itos,
                 "val_loss": val_loss,
             }, "checkpoint_best.pt")
