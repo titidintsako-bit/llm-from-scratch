@@ -1,4 +1,29 @@
-# 🧠 LLM From Scratch — Build a GPT Language Model
+# NtsakoGPT — 10M GPT From Scratch (PyTorch)
+
+**Trained checkpoint: 10.7M parameters · char-level Shakespeare · val loss 1.48 at step 1900 · 6 layers / 6 heads / 384-d · block 256**
+
+This is the trained result of the workshop below. Every line of `model.py`/`train.py`/`generate.py` was written by hand (no Trainer, no HF) and trained on Shakespeare. The model is tiny, honest, and fully reproducible — a fundamentals proof before scaling to BPE + WikiText.
+
+```bash
+python generate.py checkpoint_best.pt --prompt "To be or not" --temperature 0.8 --top_k 40 --seed 42
+# To be or not approne them and the time.
+#
+# MARCIUS:
+# Not put put his glorious, and take him too.
+# TYBALT:
+# His hath not made him to still a world.
+```
+
+| Checkpoint | Tokenizer | Params | Val loss | Steps | Device |
+|---|---|---|---|---|---|
+| `checkpoint_best.pt` (featured) | char-65 (Shakespeare) | 10.7M (6L/6H/384) | **1.48** | 1900 | MPS/CUDA/CPU ~45 min |
+| `checkpoint_v3.pt` | BPE 4096 (WikiText-103 scaffold) | smoke 0.5M | — | WIP (v3 planned: 8L/8H/512, 27.6M) | T4 ~5h (resume-safe) |
+
+> Download: `checkpoint_best.pt` is 43 MB — hosted as a GitHub Release asset (not in git). See Releases → `ntsakogpt-10m-1.48`.
+
+---
+
+# 🧠 LLM From Scratch — Workshop (original)
 
 A hands-on workshop where you write every piece of a GPT training pipeline yourself, understanding what each component does and why.
 
@@ -51,8 +76,8 @@ python train.py
 
 | Version | Tokenizer | Data | Params | Best val loss |
 |---------|-----------|------|--------|---------------|
-| v2 | char-level (65 tokens) | tiny Shakespeare (~1 MB) | 10.8M | 1.48 |
-| v3 | **BPE (4096, trained from scratch)** | **wikitext-103 (~100 MB)** | **27.6M** | 3.21 (step 3600, run #1) |
+| v2 (NtsakoGPT-10M, trained) | char-65 | Shakespeare ~1 MB | 10.7M | **1.48 @1900** |
+| v3 (scaffold) | BPE 4096 | wikitext-103 ~100 MB | 27.6M (8L/8H/512) planned | WIP — smoke only |
 
 What v3 adds: a real subword tokenizer (words become 1 token instead of 4–6),
 a 100× bigger corpus, a bigger model with 512-token context, mixed-precision
