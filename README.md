@@ -52,16 +52,19 @@ python train.py
 | Version | Tokenizer | Data | Params | Best val loss |
 |---------|-----------|------|--------|---------------|
 | v2 | char-level (65 tokens) | tiny Shakespeare (~1 MB) | 10.8M | 1.48 |
-| v3 | **BPE (4096, trained from scratch)** | **wikitext-103 (~100 MB)** | **~25M** | *see run log* |
+| v3 | **BPE (4096, trained from scratch)** | **wikitext-103 (~100 MB)** | **27.6M** | 3.21 (step 3600, run #1) |
 
 What v3 adds: a real subword tokenizer (words become 1 token instead of 4–6),
 a 100× bigger corpus, a bigger model with 512-token context, mixed-precision
 training, and checkpoints that carry the tokenizer inside them.
 
 ```bash
-# Train v3 (GPU recommended; ~1.5–2.5 h on a free Colab T4)
+# Train v3 — GPU required. ~5–6 h on a free Colab T4 = TWO sessions with
+# checkpoints in Drive (CHECKPOINT_DIR) + RESUME=1 — see DEPLOY.md
 pip install torch numpy tqdm datasets tokenizers
-python train_v3.py
+CHECKPOINT_DIR=. python train_v3.py
+# ...if interrupted:
+RESUME=1 CHECKPOINT_DIR=. python train_v3.py
 
 # Generate — works with BOTH v2 char-level and v3 BPE checkpoints
 python generate.py checkpoint_v3.pt --prompt "The history of Rome begins"

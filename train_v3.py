@@ -21,7 +21,11 @@ What changes from v2:
      tokenizer + config travel together).
   6. Same early stopping that rescued v2 — because it works.
 
-Estimated: 1.5–2.5 h on a free T4 GPU with early stopping.
+Estimated: 4–6 h on a free T4 with early stopping. **Designed to survive Colab
+.disconnects:** checkpoints include optimizer state, and re-running the same cell
+with RESUME=1 picks up exactly where the last run died (see DEPLOY.md). Save
+counting: 3h13m to reach step 3613/10000 — that estimate was wrong; 5000 steps
+is the sane budget and the curve was still improving when quota ran out.
 """
 import math
 import os
@@ -41,7 +45,14 @@ SMOKE_TEST = os.environ.get("SMOKE_TEST", "0") == "1"
 VOCAB_SIZE = 4096        # BPE merges learned from the corpus
 DATASET_NAME = "Salesforce/wikitext"
 DATASET_CONFIG = "wikitext-103-raw-v1"
-CHECKPOINT_PATH = "checkpoint_v3.pt"
+# Point CHECKPOINT_DIR at Google Drive in Colab so checkpoints survive
+# runtime disconnects and GPU-quota outages (see DEPLOY.md).
+CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", ".")
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+CHECKPOINT_PATH = os.path.join(CHECKPOINT_DIR, "checkpoint_v3.pt")
+TOKENIZER_PATH = os.path.join(CHECKPOINT_DIR, "tokenizer_v3.json")
+LOSS_LOG_PATH = os.path.join(CHECKPOINT_DIR, "loss_log_v3.json")
+RESUME = os.environ.get("RESUME", "0") == "1"
 
 if SMOKE_TEST:
     # Tiny config: 2-min CPU run that exercises the full pipeline.
@@ -51,7 +62,7 @@ if SMOKE_TEST:
     CORPUS_LIMIT = 200_000       # chars — smoke test only
 else:
     N_LAYER, N_HEAD, N_EMBD, BLOCK_SIZE = 8, 8, 512, 512
-    BATCH_SIZE, MAX_STEPS, EVAL_INTERVAL, PATIENCE = 16, 10000, 200, 15
+    BATCH_SIZE, MAX_STEPS, EVAL_INTERVAL, PATIENCE = 16, 5000, 200, 15
     NUM_PROC = 2                 # T4 vCPU count; harmless on CPU
 
 DROPOUT = 0.1
@@ -99,6 +110,24 @@ def caching_corpus_iterator():
 
 
 # ============================================================================
+# 1.5) RESUME BOOTSTRAP (only does work when RESUME=1 and a checkpoint exists)
+# ============================================================================
+resume_state = None
+start_step = 0
+if RESUME and os.path.exists(CHECKPOINT_PATH):
+    print(f"RESUME=1: loading {CHECKPOINT_PATH} ...")
+    resume_state = torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=False)
+    start_step = resume_state["step"] + 1
+    if not os.path.exists(TOKENIZER_PATH) and "tokenizer_json" in resume_state:
+        with open(TOKENIZER_PATH, "w") as f:
+            f.write(resume_state["tokenizer_json"])
+        print(f"  extracted tokenizer -> {TOKENIZER_PATH}")
+    print(f"  checkpoint was step {resume_state['step']}, val loss {resume_state['val_loss']:.4f}; continuing from step {start_step}")
+elif RESUME:
+    print("RESUME=1 but no checkpoint found — starting fresh.")
+
+
+# ============================================================================
 # 2) TRAIN A BPE TOKENIZER ON THE CORPUS (the big idea of v3)
 # ============================================================================
 from tokenizers import Tokenizer, decoders
@@ -106,7 +135,6 @@ from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import ByteLevel
 
-TOKENIZER_PATH = "tokenizer_v3.json"
 if os.path.exists(TOKENIZER_PATH) and not SMOKE_TEST:
     print(f"Reusing existing tokenizer: {TOKENIZER_PATH}")
     tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
@@ -213,11 +241,27 @@ print(f"Model: {N_LAYER}L/{N_HEAD}H/{N_EMBD}D/{BLOCK_SIZE}ctx, {n_params / 1e6:.
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-# Mixed precision: bf16 needs no loss scaler, fp16 does; fp32 fallback on CPU.
+# Resume: restore weights + optimizer (AdamW's moment estimates) so the loss
+# curve continues seamlessly — no LR-schedule restart, no loss spike.
+best_val_loss = float("inf")
+best_step = 0
+if resume_state is not None:
+    model.load_state_dict(resume_state["model_state_dict"])
+    if "optimizer_state_dict" in resume_state:
+        optimizer.load_state_dict(resume_state["optimizer_state_dict"])
+    best_val_loss = resume_state["val_loss"]
+    best_step = resume_state["step"]
+    print(f"  restored model + optimizer (best val loss so far: {best_val_loss:.4f})")
+resume_state = None  # free the RAM
+
+# Mixed precision: T4 (compute capability 7.x) has NO bf16 cores even though
+# some torch builds report bf16 'supported' — bf16 emulates there and crawls.
+# Real bf16 needs Ampere+ (capability >= 8). On T4 we use fp16 + GradScaler.
 use_amp = device == "cuda"
-amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+bf16_ok = device == "cuda" and torch.cuda.get_device_capability()[0] >= 8
+amp_dtype = torch.bfloat16 if bf16_ok else torch.float16
 scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and amp_dtype == torch.float16))
-print(f"AMP: {use_amp} ({amp_dtype})")
+print(f"AMP: {use_amp} ({amp_dtype}; GPU capability {torch.cuda.get_device_capability() if device == 'cuda' else 'n/a'})")
 
 warmup_steps = max(10, int(0.05 * MAX_STEPS))
 min_lr = LEARNING_RATE * 0.1
@@ -274,24 +318,34 @@ def generate(model, prompt, max_new_tokens=150, temperature=0.8, top_k=40):
 # 5) TRAINING LOOP (v2's proven logic: eval -> checkpoint-if-best -> early stop)
 # ============================================================================
 loss_log = {"steps": [], "train": [], "val": []}
-best_val_loss = float("inf")
-best_step = 0
+if RESUME and os.path.exists(LOSS_LOG_PATH):
+    with open(LOSS_LOG_PATH) as f:
+        loss_log = json.load(f)
 evals_without_improvement = 0
 t0 = time.time()
 
 
 def save_checkpoint(step, val_loss):
+    # Atomic save: if the runtime dies mid-write (Drive mounts drop, quota
+    # expires mid-save), a partial file would poison RESUME. Writing to a tmp
+    # file and os.replace()-ing it over the real one means a reader ever sees
+    # either the complete old checkpoint or the complete new one — never a
+    # truncated .pt. (os.replace is atomic because tmp is on the SAME drive.)
+    tmp_path = CHECKPOINT_PATH + ".tmp"
     torch.save({
         "step": step,
         "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),   # enables exact resume
         "config": dataclasses.asdict(config),
         "tokenizer_json": tokenizer.to_str(),       # tokenizer travels with the model
         "tokenizer_format": "tokenizers.BPE.v3",
         "val_loss": val_loss,
-    }, CHECKPOINT_PATH)
+    }, tmp_path)
+    os.replace(tmp_path, CHECKPOINT_PATH)
+    print(f"  checkpoint written to {CHECKPOINT_PATH}")
 
 
-pbar = tqdm(range(MAX_STEPS), desc="Training v3")
+pbar = tqdm(range(start_step, MAX_STEPS), desc="Training v3", initial=start_step, total=MAX_STEPS)
 for step in pbar:
     if step % EVAL_INTERVAL == 0:
         losses = estimate_loss()
@@ -336,8 +390,9 @@ for step in pbar:
 elapsed = time.time() - t0
 print(f"\nTraining finished in {elapsed / 60:.1f} min | best val loss: {best_val_loss:.4f} (step {best_step})")
 
-with open("loss_log_v3.json", "w") as f:
+with open(LOSS_LOG_PATH, "w") as f:
     json.dump(loss_log, f)
+print(f"Loss log saved to {LOSS_LOG_PATH}")
 
 # ============================================================================
 # 6) SAMPLES FROM THE BEST MODEL

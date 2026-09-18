@@ -2,33 +2,57 @@
 
 Two milestones left: **train v3 in Colab**, then **deploy to a HF Space**.
 
-## Step 1 — Train v3 in Colab (one-time, ~1.5–2.5 h on free T4)
+> Reality check from run #1: the full config needs ~5–6 h of T4 time. Colab free
+> tier gives you ~3–4 h before quota runs out — so **plan on 2 sessions**, and
+> make every checkpoint land in Google Drive so nothing is ever lost to a
+> disconnect again.
 
-Use the free GPU runtime (**Runtime → Change runtime type → T4 GPU**), then:
+## Step 1 — Train v3 in Colab (Drive-backed, resumable)
+
+Use the GPU runtime (**Runtime → Change runtime type → T4 GPU**), then:
 
 ```python
-# Cell 1 — clone and train
+# Cell 1 — one-time setup: clone, install, mount Drive
 !rm -rf llm-from-scratch
 !git clone https://github.com/titidintsako-bit/llm-from-scratch.git
 %cd llm-from-scratch
 !pip install -q datasets tokenizers
-!python train_v3.py
-```
 
-Watch the log: the tokenizer training takes a few minutes, then
-`Step    0 | train: 8.3xxx | val: 8.3xxx` — yes, ~8.3 = ln(4096), the random-guess
-loss for the new vocab. Expect it to fall below 4.0 within the first few hundred steps.
-Early stopping will end the run on its own.
+from google.colab import drive
+drive.mount('/content/drive')
+!mkdir -p /content/drive/MyDrive/NtsakoGPT
+```
 
 ```python
-# Cell 2 — bring the model home (the step we missed last time!)
-from google.colab import files
-files.download("checkpoint_v3.pt")
+# Cell 2 — train (checkpoints go to Drive, survive disconnects)
+!CHECKPOINT_DIR=/content/drive/MyDrive/NtsakoGPT python train_v3.py
 ```
 
-## Step 2 — Verify locally before deploying
+Watch the log: `Step 0` should print val ≈ 8.41 (= ln(4096), the random-guess
+loss for this vocab). It fell to **3.21 by step 3600** in run #1 — healthy.
 
-Drop `checkpoint_v3.pt` in `scratchpad/`, then:
+**If quota/disconnect hits mid-run:** just reconnect (GPU again), re-run Cell 1
+and Cell 2, then:
+
+```python
+# Cell 3 — resume exactly where it stopped
+!RESUME=1 CHECKPOINT_DIR=/content/drive/MyDrive/NtsakoGPT python train_v3.py
+```
+
+Resume restores the model **and** the AdamW optimizer state, so the loss curve
+continues seamlessly. Only catch: the tokenizer/corpus pass (~2 min) re-runs
+before training continues — that's normal.
+
+## Step 2 — Bring the model home (the step we missed last time!)
+
+From Drive, or straight from a finished session:
+
+```python
+from google.colab import files
+files.download("/content/drive/MyDrive/NtsakoGPT/checkpoint_v3.pt")  # ~320MB
+```
+
+Put it in `scratchpad/` on your machine, then verify locally before deploying:
 
 ```bash
 python3 generate.py checkpoint_v3.pt --prompt "The history of Rome begins" --max_new_tokens 200
@@ -60,5 +84,5 @@ The first build takes ~5 min (it installs torch). Your Space then lives at
 
 - If the Space build fails on `sdk_version`, create the Space first and copy the
   `sdk_version` value it puts in its generated `README.md` (newest Gradio changes often).
-- Generation on free CPU: ~1–2 s per token for the 25M model — fine for a demo.
+- Generation on free CPU: ~1–2 s per token for the 27M model — fine for a demo.
 - The Space never needs the `datasets` library — the tokenizer rides inside the checkpoint.
