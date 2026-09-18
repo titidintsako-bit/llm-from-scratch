@@ -47,6 +47,28 @@ cd scratchpad
 python train.py
 ```
 
+## 🚀 v3 — NtsakoGPT (the "GPT-2-lite" upgrade)
+
+| Version | Tokenizer | Data | Params | Best val loss |
+|---------|-----------|------|--------|---------------|
+| v2 | char-level (65 tokens) | tiny Shakespeare (~1 MB) | 10.8M | 1.48 |
+| v3 | **BPE (4096, trained from scratch)** | **wikitext-103 (~100 MB)** | **~25M** | *see run log* |
+
+What v3 adds: a real subword tokenizer (words become 1 token instead of 4–6),
+a 100× bigger corpus, a bigger model with 512-token context, mixed-precision
+training, and checkpoints that carry the tokenizer inside them.
+
+```bash
+# Train v3 (GPU recommended; ~1.5–2.5 h on a free Colab T4)
+pip install torch numpy tqdm datasets tokenizers
+python train_v3.py
+
+# Generate — works with BOTH v2 char-level and v3 BPE checkpoints
+python generate.py checkpoint_v3.pt --prompt "The history of Rome begins"
+```
+
+Deploy a public web demo with `space/` + `DEPLOY.md` (Hugging Face Spaces, free tier).
+
 ## 🏗️ Architecture
 
 ```
@@ -153,6 +175,8 @@ llm-from-scratch/
 │   ├── generate.py          # Text generation
 │   ├── attention_deep_dive.py   # Attention explanation
 │   └── backprop_deep_dive.py    # Backpropagation explanation
+│   ├── train_v3.py          # v3: BPE tokenizer + wikitext-103 (NtsakoGPT)
+│   └── space/               # Hugging Face Space demo (app.py + README.md)
 └── data/
     └── shakespeare.txt      # Training dataset
 ```

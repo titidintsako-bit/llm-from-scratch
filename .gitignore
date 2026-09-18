@@ -2,7 +2,10 @@
 data/
 *.pt
 loss_log.json
+loss_log_v3.json
 loss_curves.png
+tokenizer_v3.json
 __pycache__/
 *.pyc
+.venv/
 .ipynb_checkpoints/
