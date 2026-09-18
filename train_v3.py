@@ -84,6 +84,20 @@ def corpus_iterator():
             break
 
 
+# One streaming pass serves two masters: the BPE trainer and the training
+# corpus (v1 of this script streamed the hub twice — slower, and twice the
+# rate-limit exposure).
+cache = {"parts": None}
+
+
+def caching_corpus_iterator():
+    parts = []
+    for line in corpus_iterator():
+        parts.append(line)
+        yield line
+    cache["parts"] = parts
+
+
 # ============================================================================
 # 2) TRAIN A BPE TOKENIZER ON THE CORPUS (the big idea of v3)
 # ============================================================================
@@ -109,7 +123,7 @@ else:
     # ("Ġthe" = " the"), and the matching decoder reassembles text exactly.
     tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
     tokenizer.decoder = decoders.ByteLevel()
-    tokenizer.train_from_iterator(corpus_iterator(), trainer=trainer)
+    tokenizer.train_from_iterator(caching_corpus_iterator(), trainer=trainer)
     tokenizer.save(TOKENIZER_PATH)
 
 actual_vocab = tokenizer.get_vocab_size(with_added_tokens=True)
@@ -119,16 +133,52 @@ for s in [" the", " think", " king", "Fantastical"]:
     print(f"  {s!r:15} -> {len(ids)} token(s) {ids}")
 
 # ============================================================================
-# 3) COLLECT THE CORPUS TEXT (second stream pass) AND SPLIT
+# 3) ENCODE THE CORPUS IN BOUNDED BATCHES  (fixes the "stuck" step)
+# ----------------------------------------------------------------------------
+# v1 of this script called tokenizer.encode(text_all) ONCE on the whole
+# ~100M-char corpus. The tokenizers library then materialized offsets, masks
+# and token strings for ~28M tokens in one go — several GB of RAM — so on
+# Colab it swapped itself into looking frozen. Production pipelines encode in
+# bounded batches instead: encode_batch() caps memory AND runs multi-threaded.
 # ============================================================================
-text_parts = []
-for line in corpus_iterator():                     # same source the tokenizer saw
-    text_parts.append(line)
-text_all = "".join(text_parts)
+CHUNK_CHARS = 50_000 if SMOKE_TEST else 1_000_000
 
-print(f"Corpus: {len(text_all):,} chars -> encoding ...")
-ids = tokenizer.encode(text_all).ids
-tokens = torch.tensor(ids, dtype=torch.long)
+if cache["parts"] is not None:
+    text_parts = cache["parts"]        # free: already collected while training the tokenizer
+else:
+    print("Streaming corpus (tokenizer was reused from disk, so a fresh pass)...")
+    text_parts = list(corpus_iterator())
+
+print(f"Corpus: {sum(map(len, text_parts)):,} chars -> encoding in ~{CHUNK_CHARS:,}-char batches ...")
+id_chunks: list = []
+batch: list = []
+batch_len = 0
+
+
+def flush_batch():
+    global batch, batch_len
+    if batch:
+        ids = []
+        for enc in tokenizer.encode_batch(batch):
+            ids.extend(enc.ids)
+        id_chunks.append(torch.tensor(ids, dtype=torch.long))
+        batch, batch_len = [], 0
+
+
+for line in tqdm(text_parts, desc="Encoding", unit=" lines"):
+    batch.append(line)
+    batch_len += len(line)
+    if batch_len >= CHUNK_CHARS:
+        flush_batch()
+flush_batch()
+tokens = torch.cat(id_chunks)
+
+if SMOKE_TEST:
+    # The one invariant a tokenizer must never break: encode -> decode is the identity.
+    text_all = "".join(text_parts)
+    assert tokenizer.decode(tokens.tolist()) == text_all, "chunked BPE round-trip failed!"
+    print(f"Smoke check OK: chunked encode -> decode round-trips exactly ({len(tokens):,} tokens)")
+
 n = int(0.99 * len(tokens))                        # 99% train, 1% val (big data!)
 train_tokens, val_tokens = tokens[:n], tokens[n:]
 print(f"Tokens: {len(tokens):,} | vocab: {actual_vocab} | train: {len(train_tokens):,} | val: {len(val_tokens):,}")
